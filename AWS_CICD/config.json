@@ -1,0 +1,11 @@
+{
+	"Parameters" : {
+		"InputDataPrefix" : "raw",
+		"OutputDataPrefix" : "processed/",
+		"VpcId" : "vpc-xxxxxxxx",
+		"Subnets" : "subnet-xxxxxxx",
+		"DatalakeBucket" : "DATALAKE_S3_BUCKET",
+		"FileNameTriggeringPatternList" : "[\"fileA.csv\",\"fileB.csv\",\"fileC.csv\"]",
+		"JobToExecute": "JOB_TO_EXECUTE"
+	}
+}

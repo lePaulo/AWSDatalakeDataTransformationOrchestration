@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+
+  ListS3arn:
+    Default: arn:aws:s3:::my-datalake/raw/
+    Type: CommaDelimitedList
+    Description: >-
+      Please enter a comma-delimited list of s3 arns on which you want to follow activity 
+      (i.e. arn:aws:s3:::my-datalake/raw/,arn:aws:s3:::my-datalake/refined/)
+      
+Metadata:
+
+  'AWS::CloudFormation::Interface':
+    ParameterLabels:
+      ListS3arn:
+        default: List of S3 arns
+        
+Resources:
+
+  MyRawDataTrail:
+    DependsOn:
+      - TrailBucketPolicy
+    Properties:
+      EventSelectors:
+        - DataResources:
+            - Type: 'AWS::S3::Object'
+              Values: !Ref ListS3arn
+          IncludeManagementEvents: false
+          ReadWriteType: WriteOnly
+      IncludeGlobalServiceEvents: false
+      IsLogging: true
+      IsMultiRegionTrail: false
+      S3BucketName: !Ref TrailBucket
+    Type: 'AWS::CloudTrail::Trail'
+
+  TrailBucket:
+    Type: 'AWS::S3::Bucket'
+
+  TrailBucketPolicy:
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Statement:
+          - Action: 's3:GetBucketAcl'
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Resource: !Sub 'arn:aws:s3:::${TrailBucket}'
+            Sid: AWSCloudTrailAclCheck
+          - Action: 's3:PutObject'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Resource: !Sub 'arn:aws:s3:::${TrailBucket}/AWSLogs/${AWS::AccountId}/*'
+            Sid: AWSCloudTrailWrite
+        Version: 2012-10-17
+    Type: 'AWS::S3::BucketPolicy' 

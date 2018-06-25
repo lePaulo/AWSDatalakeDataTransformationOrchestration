@@ -1,0 +1,28 @@
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - echo Connect to ECR
+      - $(aws ecr get-login --no-include-email)
+  build:
+    commands:
+      - echo Entering build phase....
+      - echo Build artifact with JOB_SRC directory and buid an archive to be included in a docker image
+      - mkdir --parent AWS_CICD/builds
+      - zip -r AWS_CICD/builds/job.zip JOB_SRC/*
+      - echo Build Docker image started on `date`
+      - docker build --tag "${REPOSITORY_URI}:${CODEBUILD_RESOLVED_SOURCE_VERSION}" AWS_CICD/.
+      - sed -i -e "s|MYIMAGE|${REPOSITORY_URI}:${CODEBUILD_RESOLVED_SOURCE_VERSION}|g" AWS_CICD/template.yml
+      - sed -i -e "s|DATALAKE_S3_BUCKET|${DATALAKE_S3_BUCKET}|g" AWS_CICD/config.json
+      - sed -i -e "s|JOB_TO_EXECUTE|job|g" AWS_CICD/config.json
+      - aws cloudformation package --template AWS_CICD/template.yml --s3-bucket $S3_BUCKET --output-template template-export.yml
+  post_build:
+    commands:
+      - docker push "${REPOSITORY_URI}:${CODEBUILD_RESOLVED_SOURCE_VERSION}"
+      - printf '{"tag":"%s"}' $CODEBUILD_RESOLVED_SOURCE_VERSION > build.json
+artifacts:
+  type: zip
+  files:
+    - template-export.yml
+    - build.json
+    - AWS_CICD/config.json

@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  AppName:
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9\-]*$'
+    Description: >-
+      Application Name, will be use to set the name of all components, must be
+      in lower case
+
+  CodeCommitRepository:
+    Type: String
+    Description: Name of the Git repository on which your code will be commited
+
+  GitBranch:
+    Type: String
+    Default: master
+    Description: Git branch to use for the deployment. Default is master
+
+  DatalakeS3Bucket:
+    Type: String
+    Default: my-datalake
+
+  ProjectConfigParameterFile:
+    Type: String
+    Default: AWS_CICD/config.json
+    Description: >-
+      Name of the file in your project repository that contains all parameter
+      values
+
+  CodebuildSpecificationFile:
+    Type: String
+    Default: AWS_CICD/buildspec.yml
+    Description: >-
+      Name of the file in your project repository that contains the build
+      specifications.
+
+Metadata:
+
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Application Configuration
+        Parameters:
+          - AppName
+          - CodeCommitRepository
+          - GitBranch
+          - DatalakeS3Bucket
+          - ProjectConfigParameterFile
+          - CodebuildSpecificationFile
+    ParameterLabels:
+      AppName:
+        default: Application Name
+      CodeCommitRepository:
+        default: Git Repository Used
+      GitBranch:
+        default: Git Branch
+      DatalakeS3Bucket:
+        default: Datalake Bucket Name
+      ProjectConfigParameterFile:
+        default: Project Config Parameter File
+      CodebuildSpecificationFile:
+        default: Project Build Specification File
+
+Resources:
+
+  CodeBuildServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "codebuild.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: !Sub >-
+                  arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepository}
+                Effect: Allow
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:PutImage'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+              - Resource:
+                  - !Sub 'arn:aws:s3:::${ArtifactBucket}/*'
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:GetObjectVersion'
+              - Resource:
+                  - !Sub >-
+                    arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AppName}-Build
+                  - !Sub >-
+                    arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AppName}-Build:*
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "codepipeline.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource:
+                  - !Sub 'arn:aws:s3:::${ArtifactBucket}/*'
+                  - !Sub 'arn:aws:s3:::${ArtifactBucket}'
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketVersioning'
+                  - 's3:ListBucket'
+              - Resource: !Sub >-
+                  arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepository}
+                Effect: Allow
+                Action:
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:UploadArchive'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:CancelUploadArchive'
+              - Resource: !GetAtt 
+                  - CodeBuildProject
+                  - Arn
+                Effect: Allow
+                Action:
+                  - 'codebuild:StartBuild'
+                  - 'codebuild:BatchGetBuilds'
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:CreateChangeSet'
+                  - 'cloudformation:DeleteChangeSet'
+                  - 'cloudformation:DescribeChangeSet'
+                  - 'cloudformation:ExecuteChangeSet'
+                  - 'cloudformation:SetStackPolicy'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'iam:PassRole'
+                  - 'cloudwatch:*'
+
+  CloudFormationServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "cloudformation.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: CloudFormationPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: '*'
+                Effect: Allow
+                Action: '*'
+  CloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "events.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: !Sub 'start-pipeline-${AWS::StackName}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource:
+                  - !Sub >-
+                    arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+                Effect: Allow
+                Action:
+                  - 'codepipeline:StartPipelineExecution'
+
+  EcrRepository:
+    Type: 'AWS::ECR::Repository'
+    DeletionPolicy: Retain
+
+  ArtifactBucket:
+    Type: 'AWS::S3::Bucket'
+
+  CodeBuildProject:
+    Type: 'AWS::CodeBuild::Project'
+    DependsOn:
+      - EcrRepository
+    Properties:
+      Name: !Sub '${AppName}-Build'
+      ServiceRole: !GetAtt 
+        - CodeBuildServiceRole
+        - Arn
+      Artifacts:
+        Packaging: NONE
+        Type: CODEPIPELINE
+        Name: !Sub '${AWS::StackName}-Build'
+      TimeoutInMinutes: 60
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        PrivilegedMode: true
+        Image: 'aws/codebuild/docker:1.12.1'
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !Sub >-
+              ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}
+          - Name: S3_BUCKET
+            Value: !Ref ArtifactBucket
+          - Name: DATALAKE_S3_BUCKET
+            Value: !Ref DatalakeS3Bucket
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Ref CodebuildSpecificationFile
+      EncryptionKey: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3'
+
+  CodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    DependsOn:
+      - CodeBuildProject
+    Properties:
+      RoleArn: !GetAtt 
+        - CodePipelineServiceRole
+        - Arn
+      Name: !Ref AppName
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - InputArtifacts: []
+              Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: !Sub '${AWS::StackName}Source'
+              Configuration:
+                PollForSourceChanges: 'false'
+                BranchName: !Ref GitBranch
+                RepositoryName: !Ref CodeCommitRepository
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - InputArtifacts:
+                - Name: !Sub '${AWS::StackName}Source'
+              Name: CodeBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: !Sub '${AWS::StackName}Build'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - InputArtifacts:
+                - Name: !Sub '${AWS::StackName}Build'
+              Name: GenerateChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: !Sub '${AWS::StackName}-deploy-changeset'
+                RoleArn: !GetAtt 
+                  - CloudFormationServiceRole
+                  - Arn
+                Capabilities: CAPABILITY_IAM
+                StackName: !Sub '${AppName}-deploy-${AWS::StackName}'
+                TemplateConfiguration: !Sub '${AWS::StackName}Build::${ProjectConfigParameterFile}'
+                TemplatePath: !Sub '${AWS::StackName}Build::template-export.yml'
+              RunOrder: 1
+            - Name: ExecuteChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              OutputArtifacts: []
+              Configuration:
+                StackName: !Sub '${AppName}-deploy-${AWS::StackName}'
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: !Sub '${AWS::StackName}-deploy-changeset'
+              RunOrder: 2
+
+  CodePipelineTrigger:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !Sub >-
+            arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepository}
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Sub '${GitBranch}'
+      Targets:
+        - Id: !Sub '${CodePipeline}'
+          RoleArn: !GetAtt 
+            - CloudWatchEventRole
+            - Arn
+          Arn: !Sub >-
+            arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+          
+Outputs:
+
+  PipelineUrl:
+    Value: !Sub >-
+      https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${CodePipeline}
+
+  GitCloneHttpUrl:
+    Value: !Sub >-
+      https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CodeCommitRepository}
+
+  GitCloneSshUrl:
+    Value: !Sub >-
+      ssh://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CodeCommitRepository}

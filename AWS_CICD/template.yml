@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  Subnets:
+    Description: >-
+      List of subnets on which your EC2 instances containing the application
+      layer will be deployed (should always be private subnets)
+    Type: 'List<AWS::EC2::Subnet::Id>'
+
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+
+  DatalakeBucket:
+    Type: String
+
+  InputDataPrefix:
+    Default: raw/
+    Type: String
+
+  FileNameTriggeringPatternList:
+    Default: '["fileA.csv","fileB.csv","fileC.csv"]'
+    Type: String
+
+  OutputDataPrefix:
+    Default: processed/
+    Type: String
+
+  JobToExecute:
+    Type: String
+
+Resources:
+
+  BatchJobDefinition:
+    Type: 'AWS::Batch::JobDefinition'
+    Properties:
+      ContainerProperties:
+        Image: MYIMAGE
+        Vcpus: 8
+        Memory: 16000
+      Type: container
+      RetryStrategy:
+        Attempts: 2
+
+  ComputeEnvironmentRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: batch.amazonaws.com
+
+  ComputeInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - >-
+          arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+        - PolicyName: ComputeInstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'S3:Get*'
+                  - 'S3:List*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DatalakeBucket}/*'
+                Effect: Allow
+              - Action:
+                  - 'S3:Put*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DatalakeBucket}/${InputDataPrefix}*'
+                  - !Sub 'arn:aws:s3:::${DatalakeBucket}/${OutputDataPrefix}*'
+                Effect: Allow
+              - Action: 'S3:ListBucket'
+                Resource: 'arn:aws:s3:::*'
+                Effect: Allow
+              - Action: 'logs:CreateLogGroup'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+
+  JobQueue:
+    Type: 'AWS::Batch::JobQueue'
+    Properties:
+      Priority: 1
+      State: ENABLED
+      ComputeEnvironmentOrder:
+        - ComputeEnvironment: !Select 
+            - 1
+            - !Split 
+              - /
+              - !Ref BatchComputeEnvironment
+          Order: 1
+
+  BatchComputeEnvironment:
+    Type: 'AWS::Batch::ComputeEnvironment'
+    Properties:
+      ComputeResources:
+        Subnets: !Ref Subnets
+        SpotIamFleetRole: !Ref AmazonEC2SpotFleetRole
+        Tags:
+          Name: !Ref 'AWS::StackName'
+        DesiredvCpus: 2
+        MinvCpus: 0
+        InstanceTypes:
+          - optimal
+        BidPercentage: 100
+        InstanceRole: !Ref ComputeInstanceProfile
+        MaxvCpus: 256
+        SecurityGroupIds:
+          - !Ref SecurityGroupForComputeInstance
+        Type: SPOT
+      Type: Managed
+      State: ENABLED
+      ServiceRole: !GetAtt 
+        - ComputeEnvironmentRole
+        - Arn
+
+  AmazonEC2SpotFleetRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole'
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetRole'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: spotfleet.amazonaws.com
+
+  SecurityGroupForComputeInstance:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: !Sub 'Security Group for ${AWS::StackName} Compute Instances'
+
+  ComputeInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref ComputeInstanceRole
+
+  CloudWatchEvent:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail:
+          eventName:
+            - PutObject
+            - CompleteMultipartUpload
+          eventSource:
+            - s3.amazonaws.com
+          requestParameters:
+            bucketName:
+              - !Ref DatalakeBucket
+        detail-type:
+          - AWS API Call via CloudTrail
+      Targets:
+        - Id: DataPrepStateMachineCloudWatchEventTarget
+          Arn: !Ref DataPrepStateMachine
+          RoleArn: !GetAtt 
+            - EventsInvokeStateMachineTargetRole
+            - Arn
+
+  EventsInvokeStateMachineTargetRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'states:StartExecution'
+                Resource: !Ref DataPrepStateMachine
+
+  DataPrepStateMachine:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      DefinitionString: !Sub |-
+        {
+          "Comment": "A state machine that submits a Jobs to AWS Batch and monitors the Jobs until it completes (could also be done on Glue, Athena, EMR, ...).",
+          "StartAt": "Init process",
+          "States": {
+            "Init process": {
+              "Type": "Task",
+              "Resource": "${InitStepFunctionLambdaFunction.Arn}",
+              "OutputPath": "$.init",
+              "ResultPath": "$.init",
+              "Next": "File Concerned?"
+            },
+            "File Concerned?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Not": {
+                    "StringEquals": "not applicable",
+                    "Variable": "$"
+                  },
+                  "Next": "Launch Data Preparation Jobs"
+                }
+              ],
+              "Default": "Skip processes"
+            },
+            "Skip processes": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Launch Data Preparation Jobs": {
+              "Type": "Task",
+              "Resource": "${JobLambdaFunction.Arn}",
+              "ResultPath": "$.jobids",
+              "Next": "Wait 10 Seconds for Data Preparation jobs to be finished"
+            },
+            "Wait 10 Seconds for Data Preparation jobs to be finished": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "Get Data Preparation Jobs Status"
+            },
+            "Get Data Preparation Jobs Status": {
+              "Type": "Task",
+              "Resource": "${CheckJobIdsFunction.Arn}",
+              "Next": "Data Preparation Jobs Completed?",
+              "InputPath": "$.jobids",
+              "ResultPath": "$.jobstatus"
+            },
+            "Data Preparation Jobs Completed?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.jobstatus",
+                  "StringEquals": "FAILED",
+                  "Next": "Data Preparation jobs Failed"
+                },
+                {
+                  "Variable": "$.jobstatus",
+                  "StringEquals": "SUCCEEDED",
+                  "Next": "Success"
+                }
+              ],
+              "Default": "Wait 10 Seconds for Data Preparation jobs to be finished"
+            },
+            "Data Preparation jobs Failed": {
+              "Type": "Fail",
+              "Cause": "Data Preparation jobs Failed",
+              "Error": "DescribeJob returned FAILED"
+            },
+            "Success": {
+              "Type": "Pass",
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt 
+        - StatesExecutionRole
+        - Arn
+
+  StatesExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub 'states.${AWS::Region}.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt 
+                    - InitStepFunctionLambdaFunction
+                    - Arn
+                  - !GetAtt 
+                    - CheckJobIdsFunction
+                    - Arn
+                  - !GetAtt 
+                    - JobLambdaFunction
+                    - Arn
+
+  InitStepFunctionLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ''
+      Description: ''
+      MemorySize: 128
+      Environment:
+        Variables:
+          FileNameTriggeringPatternList: !Ref FileNameTriggeringPatternList
+          InputDataPrefix: !Ref InputDataPrefix
+          OutputDataPrefix: !Ref OutputDataPrefix
+      Handler: lambda/index_init.lambda_handler
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 3
+      Runtime: python3.6
+
+  CheckJobIdsFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ''
+      Description: ''
+      MemorySize: 128
+      Handler: lambda/index_check_job.lambda_handler
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 3
+      Runtime: python3.6
+
+  JobLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: ''
+      Description: ''
+      MemorySize: 128
+      Environment:
+        Variables:
+          JobDefinition: !Select 
+            - 1
+            - !Split 
+              - /
+              - !Ref BatchJobDefinition
+          JobQueue: !Select 
+            - 1
+            - !Split 
+              - /
+              - !Ref JobQueue
+          OutputDataPrefix: !Ref OutputDataPrefix
+          JobToExecute: !Ref JobToExecute
+      Handler: lambda/index_job.lambda_handler
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 3
+      Runtime: python3.6
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSBatchFullAccess'
+      Policies:
+        - PolicyName: LambdaExecutionRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'S3:Get*'
+                  - 'S3:List*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DatalakeBucket}/${InputDataPrefix}*'
+                Effect: Allow
+              - Action: 'S3:ListBucket'
+                Resource: 'arn:aws:s3:::*'
+                Effect: Allow
+              - Action:
+                  - 'S3:Get*'
+                  - 'S3:List*'
+                Resource: !Sub 'arn:aws:s3:::${DatalakeBucket}/*'
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
