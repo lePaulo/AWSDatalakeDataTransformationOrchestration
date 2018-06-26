@@ -38,6 +38,7 @@ Resources:
     Type: 'AWS::S3::Bucket'
 
   TrailBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
     Properties:
       Bucket: !Ref TrailBucket
       PolicyDocument:
@@ -58,4 +59,4 @@ Resources:
             Resource: !Sub 'arn:aws:s3:::${TrailBucket}/AWSLogs/${AWS::AccountId}/*'
             Sid: AWSCloudTrailWrite
         Version: 2012-10-17
-    Type: 'AWS::S3::BucketPolicy' 
+     
