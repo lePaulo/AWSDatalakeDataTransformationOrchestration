@@ -22,7 +22,7 @@ PORTFOLIO_ID=$(aws servicecatalog create-portfolio \
                  --query PortfolioDetail.Id\
                  --output text)
 
-MY_ARN=$(aws sts get-caller-identity --query Arn --output text)
+MY_ARN=${1:-$(aws sts get-caller-identity --query Arn --output text)}
 
 aws servicecatalog associate-product-with-portfolio --product-id $PIPELINE_PRODUCT_ID --portfolio-id $PORTFOLIO_ID
 aws servicecatalog associate-product-with-portfolio --product-id $CLOUDTRAIL_PRODUCT_ID --portfolio-id $PORTFOLIO_ID
