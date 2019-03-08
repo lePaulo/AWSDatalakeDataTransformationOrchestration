@@ -12,6 +12,13 @@ There are currently 2 products in this directory:
 * CloudTrail for S3 Datalakes: Create a CloudTrail on S3 arns that are to be followed for event triggering.
 * Datalake Batch pipeline: Create a CodePipeline CI/CD pipeline for automatic deployment of project modifications on commit.
 
+or simply execute the following commands:
+
+```bash
+chmod +x SERVICE_CATALOG/service-catalog-config.sh
+SERVICE_CATALOG/service-catalog-config.sh
+```
+
 ### Step 2 - Provision a Git repository
 
 Provision a Git repository on CodeCommit with the content of the current project.
