@@ -12,11 +12,11 @@ There are currently 2 products in this directory:
 * CloudTrail for S3 Datalakes: Create a CloudTrail on S3 arns that are to be followed for event triggering.
 * Datalake Batch pipeline: Create a CodePipeline CI/CD pipeline for automatic deployment of project modifications on commit.
 
-or simply execute the following commands:
+or simply execute the following commands and replace {my_role_or_user_arn} with your own arn:
 
 ```bash
 chmod +x SERVICE_CATALOG/service-catalog-config.sh
-SERVICE_CATALOG/service-catalog-config.sh
+SERVICE_CATALOG/service-catalog-config.sh {my_role_or_user_arn}
 ```
 
 ### Step 2 - Provision a Git repository
